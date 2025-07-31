@@ -4,6 +4,7 @@ use alloy_network::{TransactionBuilder, TxSignerSync};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_signer_local::PrivateKeySigner;
+use derive_more::with_trait::Error;
 use eyre::eyre::eyre;
 use op_alloy_rpc_types::OpTransactionRequest;
 use op_revm::OpContext;
@@ -17,14 +18,17 @@ use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, BuildOutcomeKind, MissingPayloadBehaviour, PayloadBuilder,
     PayloadConfig,
 };
-use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
+use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates};
 use reth_evm::execute::BlockBuilderOutcome;
 use reth_evm::execute::BlockExecutionError;
 use reth_evm::execute::BlockValidationError;
 use reth_evm::execute::{BlockBuilder, BlockExecutor};
+use reth_evm::precompiles::PrecompilesMap;
 use reth_evm::Evm;
 use reth_evm::{ConfigureEvm, Database};
 use reth_optimism_chainspec::OpChainSpec;
+use reth_optimism_forks::OpHardforks;
+use reth_optimism_node::txpool::estimated_da_size::DataAvailabilitySized;
 use reth_optimism_node::{
     OpBuiltPayload, OpEvm, OpEvmConfig, OpNextBlockEnvAttributes, OpPayloadBuilder,
     OpPayloadBuilderAttributes,
@@ -37,7 +41,7 @@ use reth_optimism_payload_builder::OpPayloadAttributes;
 use reth_optimism_primitives::{OpPrimitives, OpTransactionSigned};
 use reth_payload_util::{NoopPayloadTransactions, PayloadTransactions};
 use reth_primitives::{Block, Recovered, SealedHeader};
-use reth_primitives_traits::SignedTransaction;
+use reth_primitives_traits::SignerRecoverable;
 use reth_provider::{
     BlockReaderIdExt, ChainSpecProvider, ExecutionOutcome, ProviderError, StateProvider,
     StateProviderFactory,
@@ -59,7 +63,11 @@ use world_chain_builder_rpc::transactions::validate_conditional_options;
 #[derive(Debug, Clone)]
 pub struct WorldChainPayloadBuilder<Client, S, Txs = ()>
 where
-    Client: StateProviderFactory + BlockReaderIdExt<Block = Block<OpTransactionSigned>>,
+    Client: StateProviderFactory
+        + BlockReaderIdExt<Block = Block<OpTransactionSigned>>
+        + ChainSpecProvider<ChainSpec: OpHardforks>
+        + Clone
+        + 'static,
 {
     pub inner: OpPayloadBuilder<WorldChainTransactionPool<Client, S>, Client, OpEvmConfig, Txs>,
     pub verified_blockspace_capacity: u8,
@@ -70,7 +78,11 @@ where
 
 impl<Client, S> WorldChainPayloadBuilder<Client, S>
 where
-    Client: StateProviderFactory + BlockReaderIdExt<Block = Block<OpTransactionSigned>>,
+    Client: StateProviderFactory
+        + BlockReaderIdExt<Block = Block<OpTransactionSigned>>
+        + ChainSpecProvider<ChainSpec: OpHardforks>
+        + Clone
+        + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -126,7 +138,11 @@ where
 
 impl<Client, S> WorldChainPayloadBuilder<Client, S>
 where
-    Client: StateProviderFactory + BlockReaderIdExt<Block = Block<OpTransactionSigned>>,
+    Client: StateProviderFactory
+        + BlockReaderIdExt<Block = Block<OpTransactionSigned>>
+        + ChainSpecProvider<ChainSpec: OpHardforks>
+        + Clone
+        + 'static,
 {
     /// Sets the rollup's compute pending block configuration option.
     pub const fn set_compute_pending_block(mut self, compute_pending_block: bool) -> Self {
@@ -186,13 +202,12 @@ impl<Client, S, T> WorldChainPayloadBuilder<Client, S, T>
 where
     Client: StateProviderFactory
         + BlockReaderIdExt<Block = Block<OpTransactionSigned>>
-        + ChainSpecProvider<ChainSpec = OpChainSpec>
+        + ChainSpecProvider<ChainSpec: OpHardforks>
         + Clone
         + 'static,
-
     S: BlobStore + Clone,
 {
-    /// Constructs an Optimism payload from the transactions sent via the
+    /// Constructs an Worldchain payload from the transactions sent via the
     /// Payload attributes by the sequencer. If the `no_tx_pool` argument is passed in
     /// the payload attributes, the transaction pool will be ignored and the only transactions
     /// included in the payload will be those sent through the attributes.
@@ -398,7 +413,7 @@ impl<Txs> WorldChainBuilder<'_, Txs> {
         >,
         Client: StateProviderFactory
             + BlockReaderIdExt<Block = Block<OpTransactionSigned>>
-            + ChainSpecProvider<ChainSpec = OpChainSpec>
+            + ChainSpecProvider<ChainSpec: OpHardforks>
             + Clone,
     {
         let Self { best } = self;
@@ -463,7 +478,7 @@ impl<Txs> WorldChainBuilder<'_, Txs> {
                 execution_output: Arc::new(execution_outcome),
                 hashed_state: Arc::new(hashed_state),
             },
-            trie: Arc::new(trie_updates),
+            trie: ExecutedTrieUpdates::Present(Arc::new(trie_updates)),
         };
 
         let no_tx_pool = op_ctx.attributes().no_tx_pool;
@@ -501,7 +516,7 @@ impl<Txs> WorldChainBuilder<'_, Txs> {
         >,
         Client: StateProviderFactory
             + BlockReaderIdExt<Block = Block<OpTransactionSigned>>
-            + ChainSpecProvider<ChainSpec = OpChainSpec>
+            + ChainSpecProvider<ChainSpec: OpHardforks>
             + Clone,
     {
         let Self { best } = self;
@@ -541,8 +556,14 @@ impl<Txs> WorldChainBuilder<'_, Txs> {
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
-pub struct WorldChainPayloadBuilderCtx<Client> {
-    pub inner: OpPayloadBuilderCtx<OpEvmConfig, OpChainSpec>,
+pub struct WorldChainPayloadBuilderCtx<Client>
+where
+    Client: StateProviderFactory
+        + BlockReaderIdExt<Block = Block<OpTransactionSigned>>
+        + ChainSpecProvider<ChainSpec: OpHardforks>
+        + Clone,
+{
+    pub inner: OpPayloadBuilderCtx<OpEvmConfig, <Client as ChainSpecProvider>::ChainSpec>,
     pub verified_blockspace_capacity: u8,
     pub pbh_entry_point: Address,
     pub pbh_signature_aggregator: Address,
@@ -554,7 +575,7 @@ impl<Client> WorldChainPayloadBuilderCtx<Client>
 where
     Client: StateProviderFactory
         + BlockReaderIdExt<Block = Block<OpTransactionSigned>>
-        + ChainSpecProvider<ChainSpec = OpChainSpec>
+        + ChainSpecProvider<ChainSpec: OpHardforks>
         + Clone,
 {
     /// Executes the given best transactions and updates the execution info.
@@ -571,7 +592,7 @@ where
         DB: Database + DatabaseCommit,
         Builder: BlockBuilder<
             Primitives = OpPrimitives,
-            Executor: BlockExecutor<Evm = OpEvm<DB, NoOpInspector>>,
+            Executor: BlockExecutor<Evm = OpEvm<DB, NoOpInspector, PrecompilesMap>>,
         >,
         TXS: PayloadTransactions<
             Transaction: WorldChainPoolTransaction<Consensus = OpTransactionSigned>,
@@ -590,8 +611,16 @@ where
 
         let mut spent_nullifier_hashes = HashSet::new();
         while let Some(pooled_tx) = best_txs.next(()) {
+            let tx_da_size = pooled_tx.estimated_da_size();
             let tx = pooled_tx.clone().into_consensus();
-            if info.is_tx_over_limits(tx.inner(), block_gas_limit, tx_da_limit, block_da_limit) {
+
+            if info.is_tx_over_limits(
+                tx_da_size,
+                block_gas_limit,
+                tx_da_limit,
+                block_da_limit,
+                tx.gas_limit(),
+            ) {
                 // we can't fit this transaction into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
                 // the iterator before we can continue
@@ -605,15 +634,6 @@ where
                     invalid_txs.push(*pooled_tx.hash());
                     continue;
                 }
-            }
-
-            // ensure we still have capacity for this transaction
-            if info.cumulative_gas_used + tx.gas_limit() > block_gas_limit {
-                // we can't fit this transaction into the block, so we need to mark it as
-                // invalid which also removes all dependent transaction from
-                // the iterator before we can continue
-                best_txs.mark_invalid(tx.signer(), tx.nonce());
-                continue;
             }
 
             // A sequencer's block should never contain blob or deposit transactions from the pool.
@@ -692,14 +712,17 @@ where
                     PayloadBuilderError::Other(e.into())
                 },
             )?;
-            let gas_used = builder.execute_transaction(tx.clone()).map_err(
-                |e: BlockExecutionError| {
-                    error!(target: "payload_builder", %e, "spend nullifiers transaction failed");
-                    PayloadBuilderError::evm(e)
-                },
-            )?;
 
-            self.commit_changes(info, base_fee, gas_used, tx);
+            // Try to execute the builder tx. In the event that execution fails due to
+            // insufficient funds, continue with the built payload. This ensures that
+            // PBH transactions still receive priority inclusion, even if the PBH nullifier
+            // is not spent rather than sitting in the default execution client's mempool.
+            match builder.execute_transaction(tx.clone()) {
+                Ok(gas_used) => self.commit_changes(info, base_fee, gas_used, tx),
+                Err(e) => {
+                    error!(target: "payload_builder", %e, "spend nullifiers transaction failed")
+                }
+            }
         }
 
         if !invalid_txs.is_empty() {
@@ -737,7 +760,7 @@ where
     ) -> Result<
         impl BlockBuilder<
             Primitives = OpPrimitives,
-            Executor: BlockExecutor<Evm = OpEvm<&'a mut State<DB>, NoOpInspector>>,
+            Executor: BlockExecutor<Evm = OpEvm<&'a mut State<DB>, NoOpInspector, PrecompilesMap>>,
         >,
         PayloadBuilderError,
     > {
@@ -788,13 +811,17 @@ pub const fn dyn_gas_limit(len: u64) -> u64 {
 
 pub fn spend_nullifiers_tx<DB, I, Client>(
     ctx: &WorldChainPayloadBuilderCtx<Client>,
-    evm: &mut OpEvm<DB, I>,
+    evm: &mut OpEvm<DB, I, PrecompilesMap>,
     nullifier_hashes: HashSet<Field>,
 ) -> eyre::Result<Recovered<OpTransactionSigned>>
 where
+    Client: StateProviderFactory
+        + BlockReaderIdExt<Block = Block<OpTransactionSigned>>
+        + ChainSpecProvider<ChainSpec: OpHardforks>
+        + Clone,
     I: Inspector<OpContext<DB>>,
     DB: revm::Database + revm::DatabaseCommit,
-    <DB as revm::Database>::Error: std::fmt::Debug + Send + Sync + derive_more::Error + 'static,
+    <DB as revm::Database>::Error: std::fmt::Debug + Send + Sync + Error + 'static,
 {
     let nonce = evm
         .db_mut()
@@ -817,5 +844,5 @@ where
 
     let signature = ctx.builder_private_key.sign_transaction_sync(&mut tx)?;
     let signed: OpTransactionSigned = tx.into_signed(signature).into();
-    Ok(signed.into_recovered_unchecked()?)
+    Ok(signed.try_into_recovered_unchecked()?)
 }

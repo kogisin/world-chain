@@ -13,13 +13,12 @@ use alloy_primitives::{
 
 use alloy_consensus::{constants::EMPTY_ROOT_HASH, transaction::TransactionMeta, Header};
 use alloy_eips::BlockId;
-use alloy_rpc_types::Withdrawals;
 use parking_lot::Mutex;
+use reth::revm::revm;
 use reth::{
     api::NodeTypes,
     chainspec::{ChainInfo, ChainSpec},
 };
-use reth::{core::primitives::SignedTransaction, revm::revm};
 use reth_db::{
     mock::{DatabaseMock, TxMock},
     models::{AccountBeforeTx, StoredBlockBodyIndices},
@@ -31,15 +30,15 @@ use reth_primitives::{
     Account, Block, Bytecode, EthPrimitives, GotExpected, Receipt, RecoveredBlock, SealedBlock,
     SealedHeader,
 };
+use reth_primitives_traits::SignerRecoverable;
 use reth_provider::{
     providers::ConsistentViewError, AccountReader, BlockBodyIndicesProvider, BlockHashReader,
-    BlockIdReader, BlockNumReader, BlockReader, BlockReaderIdExt, BlockSource, ChainSpecProvider,
-    ChangeSetReader, DatabaseProvider, DatabaseProviderFactory, EthStorage, ExecutionOutcome,
-    HashedPostStateProvider, HeaderProvider, OmmersProvider, ProviderError, ProviderResult,
+    BlockIdReader, BlockNumReader, BlockReader, BlockReaderIdExt, BlockSource, BytecodeReader,
+    ChainSpecProvider, ChangeSetReader, DatabaseProvider, DatabaseProviderFactory, EthStorage,
+    ExecutionOutcome, HashedPostStateProvider, HeaderProvider, ProviderError, ProviderResult,
     ReceiptProvider, ReceiptProviderIdExt, StageCheckpointReader, StateCommitmentProvider,
     StateProofProvider, StateProvider, StateProviderBox, StateProviderFactory, StateReader,
     StateRootProvider, StorageRootProvider, TransactionVariant, TransactionsProvider,
-    WithdrawalsProvider,
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_trie::{
@@ -441,6 +440,13 @@ impl ReceiptProvider for MockEthProvider {
     ) -> ProviderResult<Vec<Receipt>> {
         Ok(vec![])
     }
+
+    fn receipts_by_block_range(
+        &self,
+        _block_range: RangeInclusive<BlockNumber>,
+    ) -> ProviderResult<Vec<Vec<Self::Receipt>>> {
+        Ok(vec![])
+    }
 }
 
 impl ReceiptProviderIdExt for MockEthProvider {}
@@ -538,17 +544,13 @@ impl BlockReader for MockEthProvider {
         let lock = self.blocks.lock();
         match id {
             BlockHashOrNumber::Hash(hash) => Ok(lock.get(&hash).cloned()),
-            BlockHashOrNumber::Number(num) => Ok(lock.values().find(|b| b.number == num).cloned()),
+            BlockHashOrNumber::Number(num) => {
+                Ok(lock.values().find(|b| b.header.number == num).cloned())
+            }
         }
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<SealedBlock<Block<OpTransactionSigned>>>> {
-        Ok(None)
-    }
-
-    fn pending_block_with_senders(
-        &self,
-    ) -> ProviderResult<Option<RecoveredBlock<Block<OpTransactionSigned>>>> {
+    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
         Ok(None)
     }
 
@@ -622,13 +624,6 @@ impl BlockReaderIdExt for MockEthProvider {
         match self.block_by_id(id)? {
             None => Ok(None),
             Some(block) => Ok(Some(block.header)),
-        }
-    }
-
-    fn ommers_by_id(&self, id: BlockId) -> ProviderResult<Option<Vec<Header>>> {
-        match id {
-            BlockId::Number(num) => self.ommers_by_number_or_tag(num),
-            BlockId::Hash(hash) => self.ommers(BlockHashOrNumber::Hash(hash.block_hash)),
         }
     }
 }
@@ -741,19 +736,7 @@ impl HashedPostStateProvider for MockEthProvider {
     }
 }
 
-impl StateProvider for MockEthProvider {
-    fn storage(
-        &self,
-        account: Address,
-        storage_key: StorageKey,
-    ) -> ProviderResult<Option<StorageValue>> {
-        let lock = self.accounts.lock();
-        Ok(lock
-            .get(&account)
-            .and_then(|account| account.storage.get(&storage_key))
-            .copied())
-    }
-
+impl BytecodeReader for MockEthProvider {
     fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
         let lock = self.accounts.lock();
         Ok(lock.values().find_map(|account| {
@@ -767,6 +750,20 @@ impl StateProvider for MockEthProvider {
                 _ => None,
             }
         }))
+    }
+}
+
+impl StateProvider for MockEthProvider {
+    fn storage(
+        &self,
+        account: Address,
+        storage_key: StorageKey,
+    ) -> ProviderResult<Option<StorageValue>> {
+        let lock = self.accounts.lock();
+        Ok(lock
+            .get(&account)
+            .and_then(|account| account.storage.get(&storage_key))
+            .copied())
     }
 }
 
@@ -822,22 +819,6 @@ impl StateProviderFactory for MockEthProvider {
 
     fn pending_state_by_hash(&self, _block_hash: B256) -> ProviderResult<Option<StateProviderBox>> {
         Ok(Some(Box::new(self.clone())))
-    }
-}
-
-impl WithdrawalsProvider for MockEthProvider {
-    fn withdrawals_by_block(
-        &self,
-        _id: BlockHashOrNumber,
-        _timestamp: u64,
-    ) -> ProviderResult<Option<Withdrawals>> {
-        Ok(None)
-    }
-}
-
-impl OmmersProvider for MockEthProvider {
-    fn ommers(&self, _id: BlockHashOrNumber) -> ProviderResult<Option<Vec<Header>>> {
-        Ok(None)
     }
 }
 

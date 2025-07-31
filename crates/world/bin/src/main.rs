@@ -1,7 +1,7 @@
 use clap::Parser;
-use reth_optimism_cli::chainspec::OpChainSpecParser;
 use reth_optimism_cli::Cli;
 use reth_tracing::tracing::info;
+use world_chain_builder_chainspec::spec::WorldChainChainSpecParser;
 use world_chain_builder_node::{args::WorldChainArgs, node::WorldChainNode};
 use world_chain_builder_rpc::EthApiExtServer;
 use world_chain_builder_rpc::SequencerClient;
@@ -28,7 +28,7 @@ fn main() {
     }
 
     if let Err(err) =
-        Cli::<OpChainSpecParser, WorldChainArgs>::parse().run(|builder, args| async move {
+        Cli::<WorldChainChainSpecParser, WorldChainArgs>::parse().run(|builder, args| async move {
             info!(target: "reth::cli", "Launching node");
             let node = WorldChainNode::new(args.clone());
             let handle = builder
@@ -36,14 +36,14 @@ fn main() {
                 .extend_rpc_modules(move |ctx| {
                     let provider = ctx.provider().clone();
                     let pool = ctx.pool().clone();
-                    let sequencer_client =
-                        args.rollup_args.sequencer_http.map(SequencerClient::new);
+                    let sequencer_client = args.rollup_args.sequencer.map(SequencerClient::new);
                     let eth_api_ext = WorldChainEthApiExt::new(pool, provider, sequencer_client);
                     ctx.modules.replace_configured(eth_api_ext.into_rpc())?;
                     Ok(())
                 })
                 .launch()
                 .await?;
+
             handle.node_exit_future.await
         })
     {
